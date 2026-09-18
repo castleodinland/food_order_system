@@ -51,9 +51,16 @@ var (
 type Dish struct {
 	ID       int64    `json:"id"`
 	Name     string   `json:"name"`
+	Category string   `json:"category"`
 	HasPhoto bool     `json:"hasPhoto"`
 	Options  []string `json:"options"`
 	Slots    []string `json:"slots"`
+}
+
+type Category struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Emoji string `json:"emoji"`
 }
 
 type OrderItem struct {
@@ -271,12 +278,46 @@ func apiChefLogout(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, map[string]bool{"ok": true})
 }
 
+func apiChefResetPw(w http.ResponseWriter, r *http.Request) {
+	if !isChef(r) {
+		errWrite(w, 401, "请先登录厨师账号")
+		return
+	}
+	salt, ok1 := getMeta("chef_salt")
+	hash, ok2 := getMeta("chef_hash")
+	if !ok1 || !ok2 {
+		errWrite(w, 400, "尚未设置密码")
+		return
+	}
+	var req struct {
+		OldPassword string `json:"oldPassword"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errWrite(w, 400, "请求格式错误")
+		return
+	}
+	if hashPassword(req.OldPassword, salt) != hash {
+		errWrite(w, 401, "当前密码不正确")
+		return
+	}
+	if len(req.NewPassword) < 4 {
+		errWrite(w, 400, "新密码至少需要 4 个字符")
+		return
+	}
+	newSalt := newToken()
+	setMeta("chef_salt", newSalt)
+	setMeta("chef_hash", hashPassword(req.NewPassword, newSalt))
+	jsonWrite(w, 200, map[string]bool{"ok": true})
+}
+
 // dishForm 从 multipart 表单解析菜品数据
-func dishForm(r *http.Request) (name string, options []string, slots []string, photo []byte, hasPhoto bool, err error) {
+func dishForm(r *http.Request) (name string, category string, options []string, slots []string, photo []byte, hasPhoto bool, err error) {
 	if err = r.ParseMultipartForm(20 << 20); err != nil {
 		return
 	}
 	name = strings.TrimSpace(r.FormValue("name"))
+	category = strings.TrimSpace(r.FormValue("category"))
 	options = parseJSONStrings(r.FormValue("options"))
 	slots = filterSlots(parseJSONStrings(r.FormValue("slots")))
 	if len(slots) == 0 {
@@ -297,7 +338,7 @@ func dishForm(r *http.Request) (name string, options []string, slots []string, p
 func apiDishes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := db.Query("SELECT id, name, options, slots, CASE WHEN photo IS NOT NULL AND LENGTH(photo) > 0 THEN 1 ELSE 0 END FROM dishes WHERE deleted = 0 ORDER BY id DESC")
+		rows, err := db.Query("SELECT id, name, category, options, slots, CASE WHEN photo IS NOT NULL AND LENGTH(photo) > 0 THEN 1 ELSE 0 END FROM dishes WHERE deleted = 0 ORDER BY id DESC")
 		if err != nil {
 			errWrite(w, 500, "数据库错误")
 			return
@@ -307,7 +348,7 @@ func apiDishes(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var d Dish
 			var opt, sl string
-			if err := rows.Scan(&d.ID, &d.Name, &opt, &sl, &d.HasPhoto); err != nil {
+			if err := rows.Scan(&d.ID, &d.Name, &d.Category, &opt, &sl, &d.HasPhoto); err != nil {
 				continue
 			}
 			d.Options = parseJSONStrings(opt)
@@ -321,9 +362,13 @@ func apiDishes(w http.ResponseWriter, r *http.Request) {
 			errWrite(w, 401, "请先登录厨师账号")
 			return
 		}
-		name, options, slots, photo, hasPhoto, err := dishForm(r)
+		name, category, options, slots, photo, hasPhoto, err := dishForm(r)
 		if err != nil || name == "" {
 			errWrite(w, 400, "请填写菜品名称")
+			return
+		}
+		if category == "" {
+			errWrite(w, 400, "请选择品类")
 			return
 		}
 		optJSON, _ := json.Marshal(options)
@@ -332,8 +377,8 @@ func apiDishes(w http.ResponseWriter, r *http.Request) {
 		if hasPhoto {
 			photoArg = photo
 		}
-		res, err := db.Exec("INSERT INTO dishes(name, photo, options, slots, deleted, created_at) VALUES(?, ?, ?, ?, 0, ?)",
-			name, photoArg, string(optJSON), string(slotJSON), nowStr())
+		res, err := db.Exec("INSERT INTO dishes(name, category, photo, options, slots, deleted, created_at) VALUES(?, ?, ?, ?, ?, 0, ?)",
+			name, category, photoArg, string(optJSON), string(slotJSON), nowStr())
 		if err != nil {
 			errWrite(w, 500, "保存失败")
 			return
@@ -360,17 +405,21 @@ func apiDishByID(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPut: // 编辑菜品
-		name, options, slots, photo, hasPhoto, err := dishForm(r)
+		name, category, options, slots, photo, hasPhoto, err := dishForm(r)
 		if err != nil || name == "" {
 			errWrite(w, 400, "请填写菜品名称")
+			return
+		}
+		if category == "" {
+			errWrite(w, 400, "请选择品类")
 			return
 		}
 		optJSON, _ := json.Marshal(options)
 		slotJSON, _ := json.Marshal(slots)
 		if hasPhoto {
-			_, err = db.Exec("UPDATE dishes SET name=?, photo=?, options=?, slots=? WHERE id=?", name, photo, string(optJSON), string(slotJSON), id)
+			_, err = db.Exec("UPDATE dishes SET name=?, category=?, photo=?, options=?, slots=? WHERE id=?", name, category, photo, string(optJSON), string(slotJSON), id)
 		} else {
-			_, err = db.Exec("UPDATE dishes SET name=?, options=?, slots=? WHERE id=?", name, string(optJSON), string(slotJSON), id)
+			_, err = db.Exec("UPDATE dishes SET name=?, category=?, options=?, slots=? WHERE id=?", name, category, string(optJSON), string(slotJSON), id)
 		}
 		if err != nil {
 			errWrite(w, 500, "保存失败")
@@ -557,6 +606,92 @@ func apiChanges(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// apiCategories GET 获取全部品类；POST 新增品类；PUT 编辑品类；DELETE 删除品类
+func apiCategories(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := db.Query("SELECT id, name, emoji FROM categories ORDER BY id ASC")
+		if err != nil {
+			errWrite(w, 500, "数据库错误")
+			return
+		}
+		defer rows.Close()
+		list := []Category{}
+		for rows.Next() {
+			var c Category
+			if err := rows.Scan(&c.ID, &c.Name, &c.Emoji); err != nil {
+				continue
+			}
+			list = append(list, c)
+		}
+		jsonWrite(w, 200, map[string]interface{}{"categories": list})
+
+	case http.MethodPost: // 新增品类（需厨师登录）
+		if !isChef(r) {
+			errWrite(w, 401, "请先登录厨师账号")
+			return
+		}
+		var req struct {
+			Name  string `json:"name"`
+			Emoji string `json:"emoji"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+			errWrite(w, 400, "请填写品类名称")
+			return
+		}
+		res, err := db.Exec("INSERT INTO categories(name, emoji) VALUES(?, ?)", strings.TrimSpace(req.Name), strings.TrimSpace(req.Emoji))
+		if err != nil {
+			errWrite(w, 500, "保存失败")
+			return
+		}
+		id, _ := res.LastInsertId()
+		jsonWrite(w, 200, map[string]interface{}{"ok": true, "id": id})
+
+	default:
+		errWrite(w, 405, "不支持的请求方法")
+	}
+}
+
+func apiCategoryByID(w http.ResponseWriter, r *http.Request) {
+	if !isChef(r) {
+		errWrite(w, 401, "请先登录厨师账号")
+		return
+	}
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/categories/")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		errWrite(w, 400, "品类 ID 无效")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut: // 编辑品类
+		var req struct {
+			Name  string `json:"name"`
+			Emoji string `json:"emoji"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+			errWrite(w, 400, "请填写品类名称")
+			return
+		}
+		if _, err := db.Exec("UPDATE categories SET name=?, emoji=? WHERE id=?", strings.TrimSpace(req.Name), strings.TrimSpace(req.Emoji), id); err != nil {
+			errWrite(w, 500, "保存失败")
+			return
+		}
+		jsonWrite(w, 200, map[string]bool{"ok": true})
+
+	case http.MethodDelete: // 删除品类
+		if _, err := db.Exec("DELETE FROM categories WHERE id=?", id); err != nil {
+			errWrite(w, 500, "删除失败")
+			return
+		}
+		jsonWrite(w, 200, map[string]bool{"ok": true})
+
+	default:
+		errWrite(w, 405, "不支持的请求方法")
+	}
+}
+
 // ---------------- 启动 ----------------
 
 func openDB(path string) {
@@ -568,9 +703,15 @@ func openDB(path string) {
 	}
 	schema := `
 	CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+	CREATE TABLE IF NOT EXISTS categories (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		emoji TEXT NOT NULL DEFAULT ''
+	);
 	CREATE TABLE IF NOT EXISTS dishes (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
+		category TEXT NOT NULL DEFAULT '',
 		photo BLOB,
 		options TEXT NOT NULL DEFAULT '[]',
 		slots TEXT NOT NULL DEFAULT '[]',
@@ -591,6 +732,20 @@ func openDB(path string) {
 	`
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatalf("init schema failed: %v", err)
+	}
+
+	// 初始化默认品类（仅首次）
+	var catCount int
+	db.QueryRow("SELECT COUNT(*) FROM categories").Scan(&catCount)
+	if catCount == 0 {
+		defaults := []struct{ name, emoji string }{
+			{"主食", "🍚"}, {"甜品", "🍮"}, {"蔬菜", "🥬"}, {"肉菜", "🍖"},
+			{"汤", "🍲"}, {"小吃", "🥟"}, {"面食", "🍜"}, {"火锅", "🫕"},
+		}
+		for _, c := range defaults {
+			db.Exec("INSERT INTO categories(name, emoji) VALUES(?, ?)", c.name, c.emoji)
+		}
+		log.Printf("initialized default categories")
 	}
 
 	// 把任何遗留的 -wal 内容合并回主库，并切换到 DELETE 日志模式 → 整个数据库只有单文件
@@ -648,12 +803,15 @@ func main() {
 	mux.HandleFunc("/api/chef/setup", apiChefSetup)
 	mux.HandleFunc("/api/chef/login", apiChefLogin)
 	mux.HandleFunc("/api/chef/logout", apiChefLogout)
+	mux.HandleFunc("/api/chef/reset", apiChefResetPw)
 	mux.HandleFunc("/api/dishes", apiDishes)
 	mux.HandleFunc("/api/dishes/", requireChef(apiDishByID))
 	mux.HandleFunc("/api/photo/", apiPhoto)
 	mux.HandleFunc("/api/orders", apiOrders)
 	mux.HandleFunc("/api/orders/dates", apiOrderDates)
 	mux.HandleFunc("/api/changes", apiChanges)
+	mux.HandleFunc("/api/categories", apiCategories)
+	mux.HandleFunc("/api/categories/", requireChef(apiCategoryByID))
 
 	mux.Handle("/static/", http.StripPrefix("/static/",
 		http.FileServer(http.FS(mustSub(staticFS, "static")))))
