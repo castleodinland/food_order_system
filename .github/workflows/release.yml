@@ -1,0 +1,83 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.2)'
+        required: true
+        default: 'v1.0.3'
+      prerelease:
+        description: 'Mark as pre-release?'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Windows amd64
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -trimpath -ldflags "-s -w" -o dist/food_order_windows_amd64.exe .
+
+      - name: Build Linux amd64
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -trimpath -ldflags "-s -w" -o dist/food_order_linux_amd64 .
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum food_order_windows_amd64.exe food_order_linux_amd64 > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: 🍚 点餐小屋 ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          body: |
+            ## 🍚 点餐小屋 ${{ inputs.version }}
+
+            ### 下载
+
+            | 文件 | 平台 |
+            |---|---|
+            | `food_order_windows_amd64.exe` | Windows 64-bit |
+            | `food_order_linux_amd64` | Linux 64-bit |
+            | `checksums.txt` | SHA256 校验 |
+
+            ### 使用
+
+            **Windows:** 双击 `food_order_windows_amd64.exe`，浏览器自动打开。
+
+            **Linux:**
+            ```bash
+            chmod +x food_order_linux_amd64
+            ./food_order_linux_amd64 port=18888
+            ```
+
+            不指定 `port` 时默认监听 `18888`。
+          files: |
+            dist/food_order_windows_amd64.exe
+            dist/food_order_linux_amd64
+            dist/checksums.txt
