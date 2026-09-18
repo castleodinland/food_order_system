@@ -10,7 +10,7 @@ const SLOTS = [
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
 
 const state = {
-  view: 'role',          // role | chefAuth | chefHome | chefDishes | chefOrders | customerCal | customerDay | slotEditor
+  view: 'role',          // role | chefAuth | chefHome | chefDishes | chefOrders | chefSlotDetail | customerCal | customerDay | slotEditor
   hasPassword: false,
   today: '',
   calMonth: '',          // 'YYYY-MM'
@@ -109,6 +109,7 @@ async function render() {
   if (v === 'chefHome') return renderChefHome();
   if (v === 'chefDishes') return renderChefDishes();
   if (v === 'chefOrders') return renderChefOrders();
+  if (v === 'chefSlotDetail') return renderChefSlotDetail();
   if (v === 'customerCal') return renderCustomerCal();
   if (v === 'customerDay') return renderCustomerDay();
   if (v === 'slotEditor') return renderSlotEditor();
@@ -382,7 +383,7 @@ async function dishDelete(id, name) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-/* ---------------- 厨师：订餐列表 ---------------- */
+/* ---------------- 厨师：订餐列表（二级菜单） ---------------- */
 
 async function renderChefOrders() {
   if (!state.selDate) state.selDate = state.today || (await api('/api/state')).today;
@@ -396,29 +397,39 @@ async function renderChefOrders() {
   } catch (e) { return toast(e.message, 'err'); }
   const seen = changes.seen || '2000-01-01 00:00:00';
 
-  const blocks = SLOTS.map(s => {
+  // 第一级：时段概览卡片
+  const slotCards = SLOTS.map(s => {
     const items = (orderData.slots[s.key] || []);
     const hasNew = items.some(it => it.updatedAt > seen);
-    const inner = items.length === 0
-      ? '<div class="empty-hint">这个时段还没有人点餐～</div>'
-      : items.map(it => `
-        <div class="order-item">
-          ${it.hasPhoto ? '<img src="/api/photo/' + it.dishId + '" style="width:56px;height:56px;border-radius:14px;object-fit:cover;">' : ''}
-          <div style="flex:1;min-width:0;">
-            <div class="o-name">${esc(it.name)} <span class="o-qty">×${it.qty}</span></div>
-            ${it.options.length ? '<div class="o-opts">' + it.options.map(o => '<span class="mini-chip">' + esc(o) + '</span>').join('') + '</div>' : ''}
-            <div class="o-time">更新于 ${esc(it.updatedAt)}</div>
-          </div>
-        </div>`).join('');
+    const totalQty = items.reduce((sum, it) => sum + it.qty, 0);
+
+    // 简化展示：只显示图标和菜品名缩略
+    const dishIcons = items.length === 0
+      ? '<span class="muted" style="font-size:1.05rem;">暂无点餐</span>'
+      : items.map(it => it.hasPhoto
+          ? '<img src="/api/photo/' + it.dishId + '" class="slot-thumb" alt="' + esc(it.name) + '">'
+          : '<span class="slot-thumb-emoji">🍽️</span>'
+        ).join('');
+
     return `
-      <div class="card slot-block">
-        <div class="slot-head">${s.emoji} ${s.name} ${hasNew ? '<span class="new-badge">有更新</span>' : ''}</div>
-        ${inner}
-      </div>`;
+      <button class="card slot-summary-card" onclick="chefSlotDetail('${s.key}')">
+        <div class="slot-summary-head">
+          <span class="slot-emoji">${s.emoji}</span>
+          <span class="slot-summary-name">${s.name}</span>
+          ${hasNew ? '<span class="new-badge">有更新</span>' : ''}
+        </div>
+        <div class="slot-summary-body">
+          ${items.length === 0
+            ? '<span class="muted">还没有人点餐～</span>'
+            : '<div class="slot-icon-row">' + dishIcons + '</div>' +
+              '<div class="slot-summary-count">共 ' + totalQty + ' 份 · ' + items.length + ' 道菜</div>'}
+        </div>
+        <div class="slot-summary-arrow">▶</div>
+      </button>`;
   }).join('');
 
   app().innerHTML = `
-    <div class="container">
+    <div class="container" style="max-width:720px;">
       <div class="navbar">
         <div class="nav-left">
           <button class="btn btn-plain btn-sm" onclick="goto('chefHome')">⬅ 返回</button>
@@ -434,11 +445,54 @@ async function renderChefOrders() {
         </div>
         <div class="text-center" style="font-size:1.25rem;font-weight:bold;">${dateTitle(date)}</div>
       </div>
-      ${blocks}
+      ${slotCards}
+      <div class="muted text-center" style="margin-top:0.5rem;font-size:0.95rem;">点击时段卡片查看详细菜品和要求 👆</div>
     </div>`;
 
   // 打开即视为已读，红点提示清除
   try { await api('/api/changes', { method: 'POST' }); } catch (e) { /* ignore */ }
+}
+
+/* 厨师：第二级 —— 时段详情 */
+async function renderChefSlotDetail() {
+  const date = state.selDate;
+  const slotKey = state.selSlot;
+  const slot = slotInfo(slotKey);
+  let orderData;
+  try { orderData = await api('/api/orders?date=' + date); } catch (e) { return toast(e.message, 'err'); }
+  const items = orderData.slots[slotKey] || [];
+
+  const inner = items.length === 0
+    ? '<div class="empty-hint">这个时段还没有人点餐～</div>'
+    : items.map(it => `
+        <div class="order-item">
+          ${it.hasPhoto ? '<img src="/api/photo/' + it.dishId + '" style="width:56px;height:56px;border-radius:14px;object-fit:cover;flex-shrink:0;">' : ''}
+          <div style="flex:1;min-width:0;">
+            <div class="o-name">${esc(it.name)} <span class="o-qty">×${it.qty}</span></div>
+            ${it.options.length ? '<div class="o-opts">' + it.options.map(o => '<span class="mini-chip">' + esc(o) + '</span>').join('') + '</div>' : ''}
+            <div class="o-time">更新于 ${esc(it.updatedAt)}</div>
+          </div>
+        </div>`).join('');
+
+  app().innerHTML = `
+    <div class="container" style="max-width:720px;">
+      <div class="navbar">
+        <div class="nav-left">
+          <button class="btn btn-plain btn-sm" onclick="goto('chefOrders')">⬅ 返回概览</button>
+          <div class="title">${slot.emoji} ${slot.name}详情</div>
+        </div>
+        <div class="muted" style="font-size:1rem;">${dateTitle(date)}</div>
+      </div>
+      <div class="card slot-block">
+        <div class="slot-head">${slot.emoji} ${slot.name} · 共 ${items.reduce((s,it)=>s+it.qty,0)} 份</div>
+        ${inner}
+      </div>
+    </div>`;
+}
+
+function chefSlotDetail(slotKey) {
+  state.selSlot = slotKey;
+  goto('chefSlotDetail');
 }
 
 function chefOrdersNav(n) { state.selDate = addDays(state.selDate, n); renderChefOrders(); }
@@ -467,8 +521,7 @@ async function renderCustomerCal() {
     cells += `
       <button class="cal-cell ${cnt ? 'has-meal' : ''} ${isToday ? 'today' : ''}" onclick="customerPickDate('${dstr}')">
         <span>${d}</span>
-        ${isToday ? '<span class="meal-mark" style="color:var(--orange);">今天</span>' : ''}
-        ${cnt ? '<span class="meal-mark">🍱 ' + cnt + ' 份</span>' : ''}
+        ${cnt ? '<span class="meal-mark">🍱' + cnt + '</span>' : ''}
       </button>`;
   }
 
@@ -485,6 +538,7 @@ async function renderCustomerCal() {
           <button class="btn btn-plain btn-sm" onclick="calNav(-1)">◀ 上月</button>
           <div class="cal-title">${y}年${m}月</div>
           <button class="btn btn-plain btn-sm" onclick="calNav(1)">下月 ▶</button>
+          <button class="btn btn-orange btn-sm" onclick="calGoToday()">📌 今天</button>
         </div>
         <div class="calendar">
           ${WEEKDAYS.map(w => '<div class="cal-week">周' + w + '</div>').join('')}
@@ -502,6 +556,11 @@ function calNav(n) {
   const [y, m] = state.calMonth.split('-').map(Number);
   const d = new Date(y, m - 1 + n, 1);
   state.calMonth = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  renderCustomerCal();
+}
+
+function calGoToday() {
+  state.calMonth = state.today.slice(0, 7);
   renderCustomerCal();
 }
 
